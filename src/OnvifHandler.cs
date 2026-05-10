@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 
 namespace V380Decoder.src
@@ -6,8 +8,20 @@ namespace V380Decoder.src
   {
     private static Timer ptzStopTimer;
     private static readonly object ptzLock = new();
-    public static string Handle(string action, string body, HttpContext ctx, V380Client camera, int httpPort, int rtspPort)
+
+    public static string Handle(string action, string body, HttpContext ctx, V380Client camera, int httpPort, int rtspPort, bool secure = false, string username = "", string password = "")
     {
+      if (secure
+          && !Contains(action, body, "GetSystemDateAndTime")
+          && !Contains(action, body, "GetCapabilities")
+          && !Contains(action, body, "GetScopes"))
+      {
+        string securityError = CheckWsSecurity(body, username, password);
+        if (securityError != null)
+        {
+          return SoapFault("SecurityError", securityError);
+        }
+      }
       if (Contains(action, body, "GetSystemDateAndTime")) return RespGetSystemDateAndTime();
       else if (Contains(action, body, "GetDeviceInformation")) return RespGetDeviceInformation(camera);
       else if (Contains(action, body, "GetServices")) return RespGetServices(ctx);
@@ -59,6 +73,79 @@ namespace V380Decoder.src
         LogUtils.debug($"[ONVIF] !! Unhandled: {action}");
         return SoapFault("ActionNotSupported", action);
       }
+    }
+
+
+    private static string CheckWsSecurity(string body, string expectedUsername, string expectedPassword)
+    {
+      var usernameMatch = Regex.Match(body, @"<(?:\w+:)?Username[^>]*>([^<]*)</(?:\w+:)?Username>", RegexOptions.IgnoreCase);
+      var passwordMatch = Regex.Match(body, @"<(?:\w+:)?Password[^>]*>([^<]*)</(?:\w+:)?Password>", RegexOptions.IgnoreCase);
+      var nonceMatch = Regex.Match(body, @"<(?:\w+:)?Nonce[^>]*>([^<]*)</(?:\w+:)?Nonce>", RegexOptions.IgnoreCase);
+      var createdMatch = Regex.Match(body, @"<(?:\w+:)?Created[^>]*>([^<]*)</(?:\w+:)?Created>", RegexOptions.IgnoreCase);
+      var passwordTypeMatch = Regex.Match(body, @"<(?:\w+:)?Password[^>]*Type=""([^""]*)""", RegexOptions.IgnoreCase);
+
+      if (!usernameMatch.Success || !passwordMatch.Success)
+      {
+        return "Missing UsernameToken credentials";
+      }
+
+      string username = usernameMatch.Groups[1].Value;
+      string receivedDigest = passwordMatch.Groups[1].Value;
+
+      if (username != expectedUsername)
+      {
+        return "Invalid username";
+      }
+
+      bool isDigest = passwordTypeMatch.Success &&
+                      passwordTypeMatch.Groups[1].Value.Contains("PasswordDigest", StringComparison.OrdinalIgnoreCase);
+
+      if (isDigest)
+      {
+        if (!nonceMatch.Success || !createdMatch.Success)
+        {
+          return "PasswordDigest requires Nonce and Created";
+        }
+
+        string nonce = nonceMatch.Groups[1].Value;
+        string created = createdMatch.Groups[1].Value;
+
+        try
+        {
+          byte[] nonceBytes = Convert.FromBase64String(nonce);
+          byte[] createdBytes = System.Text.Encoding.UTF8.GetBytes(created);
+          byte[] passwordBytes = System.Text.Encoding.UTF8.GetBytes(expectedPassword);
+
+          using (var sha1 = SHA1.Create())
+          {
+            byte[] combined = new byte[nonceBytes.Length + createdBytes.Length + passwordBytes.Length];
+            Buffer.BlockCopy(nonceBytes, 0, combined, 0, nonceBytes.Length);
+            Buffer.BlockCopy(createdBytes, 0, combined, nonceBytes.Length, createdBytes.Length);
+            Buffer.BlockCopy(passwordBytes, 0, combined, nonceBytes.Length + createdBytes.Length, passwordBytes.Length);
+
+            byte[] computed = sha1.ComputeHash(combined);
+            string computedDigest = Convert.ToBase64String(computed);
+
+            if (receivedDigest != computedDigest)
+            {
+              return "Invalid password digest";
+            }
+          }
+        }
+        catch (Exception ex)
+        {
+          return $"PasswordDigest validation error: {ex.Message}";
+        }
+      }
+      else
+      {
+        if (receivedDigest != expectedPassword)
+        {
+          return "Invalid password";
+        }
+      }
+
+      return null;
     }
 
     private static string HandleContinuousMove(string body, V380Client camera)

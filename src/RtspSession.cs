@@ -9,6 +9,8 @@ namespace V380Decoder.src
         private readonly TcpClient tcp;
         private readonly NetworkStream ns;
         private readonly RtspServer server;
+        private readonly bool secure;
+        private bool authenticated;
         private Thread readThread;
         private volatile bool playing;
         private volatile bool alive = true;
@@ -23,9 +25,11 @@ namespace V380Decoder.src
 
         public event Action OnClose;
 
-        public RtspSession(int id, TcpClient tcp, RtspServer server)
+        public RtspSession(int id, TcpClient tcp, RtspServer server, bool secure = false)
         {
             this.id = id; this.tcp = tcp; this.server = server;
+            this.secure = secure;
+            this.authenticated = !secure; // if not secure, auto-authenticate
             ns = tcp.GetStream();
         }
 
@@ -70,6 +74,36 @@ namespace V380Decoder.src
             finally { Close(); }
         }
 
+        // ── Authentication ──────────────────────────────────
+        private bool CheckAuth(string authHeader)
+        {
+            if (string.IsNullOrEmpty(authHeader)) return false;
+
+            var headerParts = authHeader.Split(':', 2);
+            if (headerParts.Length != 2) return false;
+
+            string authValue = headerParts[1].Trim();
+            if (!authValue.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            try
+            {
+                string encoded = authValue["Basic ".Length..].Trim();
+                string credential = Encoding.ASCII.GetString(Convert.FromBase64String(encoded));
+                var parts = credential.Split(':', 2);
+
+                if (parts.Length == 2 &&
+                    parts[0] == server.Username &&
+                    parts[1] == server.Password)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         void HandleRequest(string req)
         {
             string[] lines = req.Split("\r\n", StringSplitOptions.None);
@@ -80,6 +114,19 @@ namespace V380Decoder.src
             string cseq = lines.FirstOrDefault(l => l.StartsWith("CSeq:", StringComparison.OrdinalIgnoreCase))
                                   ?.Split(':', 2)[1].Trim() ?? "0";
             string transport = lines.FirstOrDefault(l => l.StartsWith("Transport:", StringComparison.OrdinalIgnoreCase)) ?? "";
+            string authHeader = lines.FirstOrDefault(l => l.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase)) ?? "";
+
+            // Check authentication for methods other than OPTIONS (if secure)
+            if (secure && method != "OPTIONS" && !authenticated)
+            {
+                if (!CheckAuth(authHeader))
+                {
+                    Send($"RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\n" +
+                         $"WWW-Authenticate: Basic realm=\"V380 Authentication\"\r\n\r\n");
+                    return;
+                }
+                authenticated = true;
+            }
 
             switch (method)
             {

@@ -82,7 +82,7 @@ namespace V380Decoder.src
                     <d:ProbeMatches>
                     <d:ProbeMatch>
                         <w:EndpointReference>
-                        <w:Address>V380</w:Address>
+                        <w:Address>{xaddr}</w:Address>
                         </w:EndpointReference>
                         <d:Types>dn:NetworkVideoTransmitter</d:Types>
                         <d:Scopes>

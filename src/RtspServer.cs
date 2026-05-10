@@ -7,6 +7,9 @@ namespace V380Decoder.src
     public class RtspServer
     {
         private readonly int port;
+        private readonly bool secure;
+        private readonly string username;
+        private readonly string password;
         private TcpListener listener;
         private Thread acceptThread;
         private volatile bool running;
@@ -19,16 +22,27 @@ namespace V380Decoder.src
         private byte[] cachedSps, cachedPps;
         private readonly object sdpLock = new();
 
-        public RtspServer(int port) { this.port = port; }
+        public RtspServer(int port, bool secure, string username, string password)
+        {
+            this.port = port;
+            this.username = username;
+            this.password = password;
+            this.secure = secure;
+        }
+
+        public bool IsSecure => secure;
+        public string Username => username;
+        public string Password => password;
 
         public void Start()
         {
+            string basicAuth = secure ? $"{username}:{password}@" : string.Empty;
             listener = new TcpListener(IPAddress.Any, port);
             listener.Start(10);
             running = true;
             acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "rtsp-accept" };
             acceptThread.Start();
-            Console.Error.WriteLine($"[RTSP] rtsp://{NetworkHelper.GetLocalIPAddress()}:{port}/live");
+            Console.Error.WriteLine($"[RTSP] rtsp://{basicAuth}{NetworkHelper.GetLocalIPAddress()}:{port}/live");
         }
 
         void AcceptLoop()
@@ -40,7 +54,7 @@ namespace V380Decoder.src
                     var tcp = listener.AcceptTcpClient();
                     tcp.NoDelay = true;
                     int id = Interlocked.Increment(ref nextId);
-                    var s = new RtspSession(id, tcp, this);
+                    var s = new RtspSession(id, tcp, this, secure);
                     sessions[id] = s;
                     s.Start();
                     s.OnClose += () => sessions.TryRemove(id, out _);

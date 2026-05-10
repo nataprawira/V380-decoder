@@ -5,7 +5,7 @@ Extract video and audio from encrypted V380 camera. Newer V380 cameras use encry
 This is a port of [prsyahmi/v380](https://github.com/prsyahmi/v380) with significant enhancements:
 - ✅ Audio and video decryption
 - ✅ RTSP server output
-- ✅ ONVIF support (experimental - tested with Onvif Device Manager)
+- ✅ ONVIF support
 - ✅ Web UI and REST API for camera control
 - ✅ Snapshot API
 - ✅ Cloud relay streaming support
@@ -25,7 +25,7 @@ This is a port of [prsyahmi/v380](https://github.com/prsyahmi/v380) with signifi
 ## Requirements
 
 - .NET 10 SDK (for building from source)
-- FFmpeg (optional, for piping video/audio output)
+- FFmpeg (optional, for snapshot or piping video/audio output)
 
 ## Command Line Arguments
 
@@ -42,6 +42,7 @@ This is a port of [prsyahmi/v380](https://github.com/prsyahmi/v380) with signifi
 | `--enable-api` | `false` | No | Enable Web UI and REST API |
 | `--rtsp-port` | `8554` | No | RTSP server port |
 | `--http-port` | `8080` | No | Web server port (for ONVIF/API) |
+| `--secure` | `false` | No | Enable authentication for ONVIF, RTSP and API. Uses the same username and password as the V380 camera |
 | `--debug` | `false` | No | Enable debug logging |
 | `--discover` | `false` | No | Discover camera |
 | `--help` | `false` | No | Print help |
@@ -89,9 +90,9 @@ Streaming via relay server (relay IP automatically detected):
 ./V380Decoder --id 12345678 --username admin --password password --source cloud
 ```
 
-## ONVIF Support (Experimental)
+## ONVIF Support
 
-**Status:** Experimental - tested with [Onvif Device Manager](https://sourceforge.net/projects/onvifdm/) (ODM) and [Onvif Integration](https://www.home-assistant.io/integrations/onvif/) Home Assistant
+Tested with [Onvif Device Manager](https://sourceforge.net/projects/onvifdm/) (ODM), [Onvif Integration](https://www.home-assistant.io/integrations/onvif/) Home Assistant and [Shinobi](https://shinobi.video/)
 
 **Enable ONVIF:**
 ```bash

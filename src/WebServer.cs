@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -15,19 +16,34 @@ namespace V380Decoder.src
         private readonly int rtspPort;
         private readonly bool enableApi;
         private readonly bool enableOnvif;
+        private readonly bool secure;
+        private readonly string username;
+        private readonly string password;
         private WebApplication app;
-        public WebServer(int httpPort, int rtspPort, V380Client client, bool enableApi, bool enableOnvif)
+        public WebServer(
+            int httpPort,
+            int rtspPort,
+            V380Client client,
+            bool enableApi,
+            bool enableOnvif,
+            bool secure,
+            string username,
+            string password)
         {
             this.httpPort = httpPort;
             this.rtspPort = rtspPort;
             this.client = client;
             this.enableApi = enableApi;
             this.enableOnvif = enableOnvif;
+            this.secure = secure;
+            this.username = username;
+            this.password = password;
         }
 
         public void Start()
         {
             string ipAddress = NetworkHelper.GetLocalIPAddress();
+            string basicAuth = string.Empty;
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseUrls($"http://*:{httpPort}");
 
@@ -39,8 +55,48 @@ namespace V380Decoder.src
 
             app = builder.Build();
 
-            Console.Error.WriteLine($"[SNAPSHOT] http://{ipAddress}:{httpPort}/snapshot");
-            app.MapGet("/snapshot", (HttpContext ctx) =>
+            RouteGroupBuilder api = app.MapGroup("/");
+            if (secure)
+            {
+                basicAuth = $"{username}:{password}@";
+                api.AddEndpointFilter(async (context, next) =>
+                {
+                    var http = context.HttpContext;
+
+                    var auth = http.Request.Headers.Authorization.ToString();
+
+                    if (string.IsNullOrEmpty(auth) ||
+                        !auth.StartsWith("Basic "))
+                    {
+                        http.Response.StatusCode = 401;
+
+                        http.Response.Headers.WWWAuthenticate =
+                            @"Basic realm=""V380 Authentication""";
+
+                        return Results.Empty;
+                    }
+
+                    var encoded = auth["Basic ".Length..].Trim();
+
+                    var credential = Encoding.UTF8.GetString(
+                        Convert.FromBase64String(encoded));
+
+                    var parts = credential.Split(':', 2);
+
+                    if (parts.Length != 2 ||
+                        parts[0] != username ||
+                        parts[1] != password)
+                    {
+                        http.Response.StatusCode = 401;
+                        return Results.Empty;
+                    }
+
+                    return await next(context);
+                });
+            }
+
+            Console.Error.WriteLine($"[SNAPSHOT] http://{basicAuth}{ipAddress}:{httpPort}/snapshot");
+            api.MapGet("/snapshot", (HttpContext ctx) =>
             {
                 var jpeg = client.snapshotManager.GetSnapshot(timeoutMs: 5000);
 
@@ -52,34 +108,34 @@ namespace V380Decoder.src
                     );
                 }
 
-                ctx.Response.Headers["Cache-Control"] = "no-cache";
+                ctx.Response.Headers.CacheControl = "no-cache";
 
                 return Results.File(jpeg, "image/jpeg");
             });
 
             if (enableApi)
             {
-                Console.Error.WriteLine($"[WEB] http://{ipAddress}:{httpPort}");
-                Console.Error.WriteLine($"[API] http://{ipAddress}:{httpPort}/api/");
+                Console.Error.WriteLine($"[WEB] http://{basicAuth}{ipAddress}:{httpPort}");
+                Console.Error.WriteLine($"[API] http://{basicAuth}{ipAddress}:{httpPort}/api/");
 
-                app.MapGet("/", () => Results.Content(WebPage.GetHtml(), "text/html"));
+                api.MapGet("/", () => Results.Content(WebPage.GetHtml(), "text/html"));
 
-                app.MapPost("/api/ptz/right", () => { client.PtzRight(); LogUtils.debug("[API] PTZ Right"); Results.Ok(); });
-                app.MapPost("/api/ptz/left", () => { client.PtzLeft(); LogUtils.debug("[API] PTZ Left"); Results.Ok(); });
-                app.MapPost("/api/ptz/up", () => { client.PtzUp(); LogUtils.debug("[API] PTZ Up"); Results.Ok(); });
-                app.MapPost("/api/ptz/down", () => { client.PtzDown(); LogUtils.debug("[API] PTZ Down"); Results.Ok(); });
-                app.MapPost("/api/ptz/stop", () => { client.PtzStop(); LogUtils.debug("[API] PTZ Stop"); Results.Ok(); });
+                api.MapPost("/api/ptz/right", () => { client.PtzRight(); LogUtils.debug("[API] PTZ Right"); Results.Ok(); });
+                api.MapPost("/api/ptz/left", () => { client.PtzLeft(); LogUtils.debug("[API] PTZ Left"); Results.Ok(); });
+                api.MapPost("/api/ptz/up", () => { client.PtzUp(); LogUtils.debug("[API] PTZ Up"); Results.Ok(); });
+                api.MapPost("/api/ptz/down", () => { client.PtzDown(); LogUtils.debug("[API] PTZ Down"); Results.Ok(); });
+                api.MapPost("/api/ptz/stop", () => { client.PtzStop(); LogUtils.debug("[API] PTZ Stop"); Results.Ok(); });
 
-                app.MapPost("/api/light/on", () => { client.LightOn(); LogUtils.debug("[API] Light On"); Results.Ok(); });
-                app.MapPost("/api/light/off", () => { client.LightOff(); LogUtils.debug("[API] Light Off"); Results.Ok(); });
-                app.MapPost("/api/light/auto", () => { client.LightAuto(); LogUtils.debug("[API] Light Auto"); Results.Ok(); });
+                api.MapPost("/api/light/on", () => { client.LightOn(); LogUtils.debug("[API] Light On"); Results.Ok(); });
+                api.MapPost("/api/light/off", () => { client.LightOff(); LogUtils.debug("[API] Light Off"); Results.Ok(); });
+                api.MapPost("/api/light/auto", () => { client.LightAuto(); LogUtils.debug("[API] Light Auto"); Results.Ok(); });
 
-                app.MapPost("/api/image/color", () => { client.ImageColor(); LogUtils.debug("[API] Image Color"); Results.Ok(); });
-                app.MapPost("/api/image/bw", () => { client.ImageBW(); LogUtils.debug("[API] Image B&W"); Results.Ok(); });
-                app.MapPost("/api/image/auto", () => { client.ImageAuto(); LogUtils.debug("[API] Image Auto"); Results.Ok(); });
-                app.MapPost("/api/image/flip", () => { client.ImageFlip(); LogUtils.debug("[API] Image Flip"); Results.Ok(); });
+                api.MapPost("/api/image/color", () => { client.ImageColor(); LogUtils.debug("[API] Image Color"); Results.Ok(); });
+                api.MapPost("/api/image/bw", () => { client.ImageBW(); LogUtils.debug("[API] Image B&W"); Results.Ok(); });
+                api.MapPost("/api/image/auto", () => { client.ImageAuto(); LogUtils.debug("[API] Image Auto"); Results.Ok(); });
+                api.MapPost("/api/image/flip", () => { client.ImageFlip(); LogUtils.debug("[API] Image Flip"); Results.Ok(); });
 
-                app.MapGet("/api/status", () => Results.Ok(new StatusResponse
+                api.MapGet("/api/status", () => Results.Ok(new StatusResponse
                 {
                     status = "running",
                     timestamp = DateTime.Now
@@ -88,23 +144,27 @@ namespace V380Decoder.src
 
             if (enableOnvif)
             {
-                Console.Error.WriteLine($"[ONVIF] http://{ipAddress}:{httpPort}/onvif/device_service");
+                if (secure)
+                    Console.Error.WriteLine($"[ONVIF] http://{ipAddress}:{httpPort}/onvif/device_service (WS-Security enabled: {username})");
+                else
+                    Console.Error.WriteLine($"[ONVIF] http://{ipAddress}:{httpPort}/onvif/device_service");
 
-                app.MapPost("/onvif/device_service", async (HttpContext ctx) =>
+                var onvifGroup = app.MapGroup("/");
+
+                onvifGroup.MapPost("/onvif/device_service", async (HttpContext ctx) =>
                 await HandleOnvif(ctx));
 
-                app.MapPost("/onvif/media_service", async (HttpContext ctx) =>
+                onvifGroup.MapPost("/onvif/media_service", async (HttpContext ctx) =>
                     await HandleOnvif(ctx));
 
-                app.MapPost("/onvif/ptz_service", async (HttpContext ctx) =>
+                onvifGroup.MapPost("/onvif/ptz_service", async (HttpContext ctx) =>
                     await HandleOnvif(ctx));
 
-                app.MapPost("/onvif/imaging_service", async (HttpContext ctx) =>
+                onvifGroup.MapPost("/onvif/imaging_service", async (HttpContext ctx) =>
                     await HandleOnvif(ctx));
             }
 
             Task.Run(() => app.Run());
-
         }
 
         private async Task HandleOnvif(HttpContext ctx)
@@ -127,7 +187,7 @@ namespace V380Decoder.src
                 action = action.Substring(4);
 
 
-            string resp = OnvifHandler.Handle(action, body, ctx, client, httpPort, rtspPort);
+            string resp = OnvifHandler.Handle(action, body, ctx, client, httpPort, rtspPort, secure, username, password);
 
             LogUtils.debug($"[ONVIF] response: {(resp.Length > 300 ? resp[..300] + "..." : resp)}");
 

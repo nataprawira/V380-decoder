@@ -30,6 +30,7 @@ if (args.Length > 0)
     bool enableApi = ArgParser.GetArg(args, "--enable-api", false);
     int rtspPort = ArgParser.GetArg(args, "--rtsp-port", 8554);
     int httpPort = ArgParser.GetArg(args, "--http-port", 8080);
+    bool secure = ArgParser.GetArg(args, "--secure", false);
     bool debug = ArgParser.GetArg(args, "--debug", false);
 
     if (source.Equals("lan", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(ip))
@@ -92,17 +93,29 @@ if (args.Length > 0)
     WebServer webServer = null;
     if (outputMode == OutputMode.Rtsp)
     {
-        rtsp = new(rtspPort);
+        rtsp = new(
+            rtspPort,
+            secure,
+            username,
+            password);
         rtsp.Start();
 
-        webServer = new WebServer(httpPort, rtspPort, client, enableApi, enableOnvif);
+        webServer = new(
+            httpPort,
+            rtspPort,
+            client,
+            enableApi,
+            enableOnvif,
+            secure,
+            username,
+            password);
         webServer.Start();
     }
 
     OnvifDiscovery onvifDiscovery = null;
     if (enableOnvif)
     {
-        onvifDiscovery = new OnvifDiscovery(httpPort);
+        onvifDiscovery = new(httpPort);
         onvifDiscovery.Start();
     }
 
@@ -193,6 +206,9 @@ SERVER OPTIONS:
   --enable-onvif         Enable ONVIF server (experimental) (default: false)
                          Works only with --output rtsp
                          Tested with Onvif Device Manager (ODM)
+
+  --secure               Enable authentication for ONVIF, RTSP, and API.
+                         Uses the same username and password as the V380 camera.                       
 
 OTHER OPTIONS:
   --discover             Find camera devices on the local network
