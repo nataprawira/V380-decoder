@@ -16,6 +16,7 @@ namespace V380Decoder.src
         private readonly int rtspPort;
         private readonly bool enableApi;
         private readonly bool enableOnvif;
+        private readonly bool enableMjpeg;
         private readonly bool secure;
         private readonly string username;
         private readonly string password;
@@ -26,6 +27,7 @@ namespace V380Decoder.src
             V380Client client,
             bool enableApi,
             bool enableOnvif,
+            bool enableMjpeg,
             bool secure,
             string username,
             string password)
@@ -35,6 +37,7 @@ namespace V380Decoder.src
             this.client = client;
             this.enableApi = enableApi;
             this.enableOnvif = enableOnvif;
+            this.enableMjpeg = enableMjpeg;
             this.secure = secure;
             this.username = username;
             this.password = password;
@@ -96,29 +99,57 @@ namespace V380Decoder.src
             }
 
             Console.Error.WriteLine($"[SNAPSHOT] http://{basicAuth}{ipAddress}:{httpPort}/snapshot");
-            api.MapGet("/snapshot", (HttpContext ctx) =>
+            api.MapGet("/snapshot", async (HttpContext ctx) =>
             {
-                var jpeg = client.snapshotManager.GetSnapshot(timeoutMs: 5000);
+                var jpeg = await client.snapshotManager.GetSnapshotAsync(timeoutMs: 5000);
 
-                if (jpeg == null || jpeg.Length == 0)
-                {
-                    return Results.Problem(
-                        "No snapshot available. Ensure stream is running",
-                        statusCode: 503
-                    );
-                }
+                if (jpeg == null)
+                    return Results.Problem("No snapshot available yet", statusCode: 503);
 
                 ctx.Response.Headers.CacheControl = "no-cache";
-
                 return Results.File(jpeg, "image/jpeg");
             });
+
+            if (enableMjpeg)
+            {
+                Console.Error.WriteLine($"[MJPEG] http://{basicAuth}{ipAddress}:{httpPort}/mjpeg");
+                api.MapGet("/mjpeg", async (HttpContext ctx, CancellationToken ct) =>
+                {
+                    const string boundary = "mjpegframe";
+                    ctx.Response.ContentType = $"multipart/x-mixed-replace; boundary={boundary}";
+                    ctx.Response.Headers.CacheControl = "no-cache";
+
+                    var ch = System.Threading.Channels.Channel.CreateBounded<byte[]>(
+                        new System.Threading.Channels.BoundedChannelOptions(2)
+                        {
+                            FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest
+                        });
+
+                    using var sub = client.snapshotManager.Subscribe(jpeg => ch.Writer.TryWrite(jpeg));
+
+                    try
+                    {
+                        await foreach (var jpeg in ch.Reader.ReadAllAsync(ct))
+                        {
+                            var header = System.Text.Encoding.ASCII.GetBytes(
+                                $"--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {jpeg.Length}\r\n\r\n");
+
+                            await ctx.Response.Body.WriteAsync(header, ct);
+                            await ctx.Response.Body.WriteAsync(jpeg, ct);
+                            await ctx.Response.Body.WriteAsync("\r\n"u8.ToArray(), ct);
+                            await ctx.Response.Body.FlushAsync(ct);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                });
+            }
 
             if (enableApi)
             {
                 Console.Error.WriteLine($"[WEB] http://{basicAuth}{ipAddress}:{httpPort}");
                 Console.Error.WriteLine($"[API] http://{basicAuth}{ipAddress}:{httpPort}/api/");
 
-                api.MapGet("/", () => Results.Content(WebPage.GetHtml(), "text/html"));
+                api.MapGet("/", () => Results.Content(WebPage.GetHtml(enableMjpeg), "text/html"));
 
                 api.MapPost("/api/ptz/right", () => { client.PtzRight(); LogUtils.debug("[API] PTZ Right"); Results.Ok(); });
                 api.MapPost("/api/ptz/left", () => { client.PtzLeft(); LogUtils.debug("[API] PTZ Left"); Results.Ok(); });

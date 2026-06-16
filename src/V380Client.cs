@@ -15,6 +15,7 @@ namespace V380Decoder.src
         private readonly string username, password;
         private readonly SourceStream source;
         private readonly OutputMode mode;
+        private readonly bool enableMjpeg;
         private uint authTicket, sessionId;
         private ushort deviceVersion, communicationVersion;
         private int frameWidth = 1280;
@@ -24,7 +25,7 @@ namespace V380Decoder.src
         private DeviceInfo deviceInfo;
 
 
-        public V380Client(string ip, int port, uint deviceId, string username, string password, SourceStream source, OutputMode mode)
+        public V380Client(string ip, int port, uint deviceId, string username, string password, SourceStream source, OutputMode mode, bool enableMjpeg)
         {
             this.ip = ip;
             this.port = port;
@@ -33,8 +34,9 @@ namespace V380Decoder.src
             this.password = password;
             this.source = source;
             this.mode = mode;
-            if (mode == OutputMode.Rtsp)
-                snapshotManager = new SnapshotManager();
+            this.enableMjpeg = enableMjpeg;
+            snapshotManager = new SnapshotManager();
+            snapshotManager.SetMjpegActive(enableMjpeg);
         }
 
         public void Run(RtspServer rtsp, CancellationToken ct)
@@ -400,10 +402,7 @@ namespace V380Decoder.src
                             continue;
                         }
 
-                        if (type == 0x00 && mode == OutputMode.Rtsp)
-                        {
-                            snapshotManager.UpdateFrame(payload, frameWidth, frameheight);
-                        }
+                        snapshotManager.UpdateFrame(payload, frameWidth, frameheight, isIFrame: type == 0x00);
 
                         var fd = new FrameData
                         {

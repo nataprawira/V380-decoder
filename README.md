@@ -12,7 +12,7 @@ This is a port of [prsyahmi/v380](https://github.com/prsyahmi/v380) with signifi
 
 ## Tested Cameras
 
-**Note:** I've only tested with 2 V380 cameras running device version 31.
+**Note:** I've only tested with 2 V380 cameras running device version 31 with H264 stream.
 
 **Camera 1:**
 - Software: `AppEV2W_VA3_V2.5.9.5_20231211`
@@ -40,6 +40,7 @@ This is a port of [prsyahmi/v380](https://github.com/prsyahmi/v380) with signifi
 | `--output` | `rtsp` | No | Output mode: `video`, `audio`, or `rtsp` |
 | `--enable-onvif` | `false` | No | Enable ONVIF server (requires `output=rtsp`) |
 | `--enable-api` | `false` | No | Enable Web UI and REST API |
+| `--enable-mjpeg` | `false` | No | Enable Mjpeg stream |
 | `--rtsp-port` | `8554` | No | RTSP server port |
 | `--http-port` | `8080` | No | Web server port (for ONVIF/API) |
 | `--secure` | `false` | No | Enable authentication for ONVIF, RTSP and API. Uses the same username and password as the V380 camera |
@@ -114,6 +115,16 @@ http://192.168.1.3:8080/onvif/device_service
 ## Web UI & REST API
 
 Control your camera through a web interface or REST API.
+
+**Enable MJPEG Stream:**
+```bash
+./V380Decoder --id 12345678 --username admin --password password --ip 192.168.1.2 --enable-mjpeg
+```
+
+### MJPEG Endpoint
+```
+http://192.168.1.3:8080/mjpeg
+```
 
 **Enable API:**
 ```bash

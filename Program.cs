@@ -28,6 +28,7 @@ if (args.Length > 0)
     string output = ArgParser.GetArg(args, "--output", "rtsp");
     bool enableOnvif = ArgParser.GetArg(args, "--enable-onvif", false);
     bool enableApi = ArgParser.GetArg(args, "--enable-api", false);
+    bool enableMjpeg = ArgParser.GetArg(args, "--enable-mjpeg", false);
     int rtspPort = ArgParser.GetArg(args, "--rtsp-port", 8554);
     int httpPort = ArgParser.GetArg(args, "--http-port", 8080);
     bool secure = ArgParser.GetArg(args, "--secure", false);
@@ -86,7 +87,8 @@ if (args.Length > 0)
         username,
         password,
         sourceStream,
-        outputMode
+        outputMode,
+        enableMjpeg
     );
 
     RtspServer rtsp = null;
@@ -106,6 +108,7 @@ if (args.Length > 0)
             client,
             enableApi,
             enableOnvif,
+            enableMjpeg,
             secure,
             username,
             password);
@@ -206,6 +209,8 @@ SERVER OPTIONS:
   --enable-onvif         Enable ONVIF server (experimental) (default: false)
                          Works only with --output rtsp
                          Tested with Onvif Device Manager (ODM)
+
+  --enable-mjpeg         Enable MJPEG stream for access through browser.
 
   --secure               Enable authentication for ONVIF, RTSP, and API.
                          Uses the same username and password as the V380 camera.                       
