@@ -1,0 +1,886 @@
+using System.Net.Sockets;
+using System.Text;
+
+namespace V380Decoder.src
+{
+    public class RtspSession
+    {
+        private readonly int id;
+        private readonly TcpClient tcp;
+        private readonly NetworkStream ns;
+        private readonly RtspServer server;
+        private readonly bool secure;
+
+        private bool authenticated;
+        private Thread readThread;
+
+        private volatile bool playing;
+        private volatile bool alive = true;
+
+        // RTP interleaved channels negotiated in SETUP.
+        private byte videoCh = 0;
+        private byte audioCh = 2;
+
+        // RTP state.
+        private ushort videoSeq;
+        private ushort audioSeq;
+
+        private readonly uint videoSsrc =
+            (uint)new Random().Next();
+
+        private readonly uint audioSsrc =
+            (uint)new Random().Next();
+
+        public event Action OnClose;
+
+        public RtspSession(
+            int id,
+            TcpClient tcp,
+            RtspServer server,
+            bool secure = false)
+        {
+            this.id = id;
+            this.tcp = tcp;
+            this.server = server;
+            this.secure = secure;
+
+            authenticated = !secure;
+
+            ns = tcp.GetStream();
+        }
+
+        public void Start()
+        {
+            readThread =
+                new Thread(ReadLoop)
+                {
+                    IsBackground = true,
+                    Name = $"rtsp-{id}"
+                };
+
+            readThread.Start();
+        }
+
+        public void Close()
+        {
+            if (!alive)
+                return;
+
+            alive = false;
+            playing = false;
+
+            try
+            {
+                tcp.Close();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                OnClose?.Invoke();
+            }
+            catch
+            {
+            }
+        }
+
+        // ---------------------------------------------------------
+        // RTSP REQUEST READER
+        // ---------------------------------------------------------
+
+        private void ReadLoop()
+        {
+            var sb =
+                new StringBuilder();
+
+            var buf =
+                new byte[4096];
+
+            try
+            {
+                while (alive)
+                {
+                    int n =
+                        ns.Read(
+                            buf,
+                            0,
+                            buf.Length);
+
+                    if (n <= 0)
+                        break;
+
+                    sb.Append(
+                        Encoding.ASCII.GetString(
+                            buf,
+                            0,
+                            n));
+
+                    string raw =
+                        sb.ToString();
+
+                    int end;
+
+                    while (
+                        (end =
+                            raw.IndexOf(
+                                "\r\n\r\n",
+                                StringComparison.Ordinal)) >= 0)
+                    {
+                        string req =
+                            raw[..(end + 4)];
+
+                        raw =
+                            raw[(end + 4)..];
+
+                        HandleRequest(req);
+                    }
+
+                    sb.Clear();
+                    sb.Append(raw);
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                Close();
+            }
+        }
+
+        // ---------------------------------------------------------
+        // AUTH
+        // ---------------------------------------------------------
+
+        private bool CheckAuth(
+            string authHeader)
+        {
+            if (string.IsNullOrEmpty(authHeader))
+                return false;
+
+            var headerParts =
+                authHeader.Split(
+                    ':',
+                    2);
+
+            if (headerParts.Length != 2)
+                return false;
+
+            string authValue =
+                headerParts[1].Trim();
+
+            if (!authValue.StartsWith(
+                    "Basic ",
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            try
+            {
+                string encoded =
+                    authValue[
+                        "Basic ".Length..]
+                    .Trim();
+
+                string credential =
+                    Encoding.ASCII.GetString(
+                        Convert.FromBase64String(
+                            encoded));
+
+                var parts =
+                    credential.Split(
+                        ':',
+                        2);
+
+                if (parts.Length == 2 &&
+                    parts[0] == server.Username &&
+                    parts[1] == server.Password)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        // ---------------------------------------------------------
+        // RTSP REQUEST HANDLER
+        // ---------------------------------------------------------
+
+        private void HandleRequest(
+            string req)
+        {
+            string[] lines =
+                req.Split(
+                    "\r\n",
+                    StringSplitOptions.None);
+
+            if (lines.Length == 0)
+                return;
+
+            string[] requestParts =
+                lines[0].Split(
+                    ' ',
+                    StringSplitOptions.RemoveEmptyEntries);
+
+            if (requestParts.Length < 2)
+                return;
+
+            string method =
+                requestParts[0];
+
+            string url =
+                requestParts[1];
+
+            string cseq =
+                lines.FirstOrDefault(
+                    l => l.StartsWith(
+                        "CSeq:",
+                        StringComparison.OrdinalIgnoreCase))
+                ?.Split(':', 2)[1]
+                .Trim()
+                ?? "0";
+
+            string transport =
+                lines.FirstOrDefault(
+                    l => l.StartsWith(
+                        "Transport:",
+                        StringComparison.OrdinalIgnoreCase))
+                ?? "";
+
+            string authHeader =
+                lines.FirstOrDefault(
+                    l => l.StartsWith(
+                        "Authorization:",
+                        StringComparison.OrdinalIgnoreCase))
+                ?? "";
+
+            // Authentication for all methods except OPTIONS.
+            if (secure &&
+                method != "OPTIONS" &&
+                !authenticated)
+            {
+                if (!CheckAuth(authHeader))
+                {
+                    Send(
+                        $"RTSP/1.0 401 Unauthorized\r\n" +
+                        $"CSeq: {cseq}\r\n" +
+                        $"WWW-Authenticate: Basic " +
+                        $"realm=\"V380 Authentication\"\r\n" +
+                        "\r\n");
+
+                    return;
+                }
+
+                authenticated = true;
+            }
+
+            switch (method)
+            {
+                case "OPTIONS":
+                    Reply(
+                        cseq,
+                        "Public: OPTIONS,DESCRIBE,SETUP,PLAY,TEARDOWN");
+                    break;
+
+                case "DESCRIBE":
+                {
+                    string sdp =
+                        server.BuildSdp();
+
+                    byte[] body =
+                        Encoding.ASCII.GetBytes(
+                            sdp);
+
+                    Send(
+                        $"RTSP/1.0 200 OK\r\n" +
+                        $"CSeq: {cseq}\r\n" +
+                        $"Content-Type: application/sdp\r\n" +
+                        $"Content-Length: {body.Length}\r\n" +
+                        "\r\n" +
+                        sdp);
+
+                    break;
+                }
+
+                case "SETUP":
+                {
+                    bool isAudio =
+                        url.Contains(
+                            "trackID=1",
+                            StringComparison.OrdinalIgnoreCase);
+
+                    byte defaultChannel =
+                        isAudio
+                            ? (byte)2
+                            : (byte)0;
+
+                    byte channel =
+                        defaultChannel;
+
+                    var match =
+                        System.Text.RegularExpressions.Regex.Match(
+                            transport,
+                            @"interleaved=(\d+)-(\d+)");
+
+                    if (match.Success)
+                    {
+                        channel =
+                            byte.Parse(
+                                match.Groups[1].Value);
+                    }
+
+                    if (isAudio)
+                        audioCh = channel;
+                    else
+                        videoCh = channel;
+
+                    Reply(
+                        cseq,
+                        $"Transport: RTP/AVP/TCP;" +
+                        $"unicast;" +
+                        $"interleaved={channel}-{channel + 1}",
+                        "Session: 1");
+
+                    break;
+                }
+
+                case "PLAY":
+                    Reply(
+                        cseq,
+                        "Session: 1",
+                        $"RTP-Info: " +
+                        $"url={url}/trackID=0;" +
+                        $"seq={videoSeq}," +
+                        $"url={url}/trackID=1;" +
+                        $"seq={audioSeq}");
+
+                    playing = true;
+
+                    Console.Error.WriteLine(
+                        $"[RTSP#{id}] playing");
+
+                    break;
+
+                case "TEARDOWN":
+                    Reply(
+                        cseq,
+                        "Session: 1");
+
+                    Close();
+                    break;
+
+                default:
+                    Send(
+                        $"RTSP/1.0 501 Not Implemented\r\n" +
+                        $"CSeq: {cseq}\r\n" +
+                        "\r\n");
+
+                    break;
+            }
+        }
+
+        private void Reply(
+            string cseq,
+            params string[] headers)
+        {
+            var sb =
+                new StringBuilder();
+
+            sb.Append(
+                $"RTSP/1.0 200 OK\r\n" +
+                $"CSeq: {cseq}\r\n");
+
+            foreach (var header in headers)
+                sb.Append(
+                    header + "\r\n");
+
+            sb.Append("\r\n");
+
+            Send(sb.ToString());
+        }
+
+        private void Send(
+            string text)
+        {
+            try
+            {
+                byte[] data =
+                    Encoding.ASCII.GetBytes(
+                        text);
+
+                lock (ns)
+                {
+                    ns.Write(
+                        data,
+                        0,
+                        data.Length);
+
+                    ns.Flush();
+                }
+            }
+            catch
+            {
+                alive = false;
+            }
+        }
+
+        // ---------------------------------------------------------
+        // VIDEO
+        // ---------------------------------------------------------
+
+        public void PushVideo(
+            FrameData f)
+        {
+            if (!playing)
+                return;
+
+            uint rtpTimestamp =
+                (uint)(f.Timestamp * 90);
+
+            if (f.Codec == VideoCodec.HEVC)
+            {
+                PushHevc(
+                    f,
+                    rtpTimestamp);
+
+                return;
+            }
+
+            PushH264(
+                f,
+                rtpTimestamp);
+        }
+
+        // ---------------------------------------------------------
+        // H264 RTP
+        // ---------------------------------------------------------
+
+        private void PushH264(
+            FrameData f,
+            uint rtpTimestamp)
+        {
+            RtspServer.ParseNals(
+                f.Payload,
+                VideoCodec.H264,
+                (nalType, nal) =>
+                {
+                    const int MTU = 1400;
+
+                    if (nal.Length <= MTU)
+                    {
+                        SendRtp(
+                            videoCh,
+                            96,
+                            videoSeq++,
+                            rtpTimestamp,
+                            videoSsrc,
+                            nal,
+                            0,
+                            nal.Length,
+                            marker: true);
+
+                        return;
+                    }
+
+                    if (nal.Length < 2)
+                        return;
+
+                    byte nalHdr =
+                        nal[0];
+
+                    byte fuIndicator =
+                        (byte)(
+                            (nalHdr & 0xE0) |
+                            28);
+
+                    int offset = 1;
+                    bool first = true;
+
+                    while (offset < nal.Length)
+                    {
+                        int chunk =
+                            Math.Min(
+                                MTU - 2,
+                                nal.Length - offset);
+
+                        bool last =
+                            offset + chunk >= nal.Length;
+
+                        byte fuHeader =
+                            (byte)(
+                                nalHdr & 0x1F);
+
+                        if (first)
+                            fuHeader |= 0x80;
+
+                        if (last)
+                            fuHeader |= 0x40;
+
+                        byte[] payload =
+                            new byte[2 + chunk];
+
+                        payload[0] =
+                            fuIndicator;
+
+                        payload[1] =
+                            fuHeader;
+
+                        Array.Copy(
+                            nal,
+                            offset,
+                            payload,
+                            2,
+                            chunk);
+
+                        SendRtp(
+                            videoCh,
+                            96,
+                            videoSeq++,
+                            rtpTimestamp,
+                            videoSsrc,
+                            payload,
+                            0,
+                            payload.Length,
+                            marker: last);
+
+                        offset += chunk;
+                        first = false;
+                    }
+                });
+        }
+
+        // ---------------------------------------------------------
+        // HEVC RTP - RFC 7798
+        // ---------------------------------------------------------
+
+        private void PushHevc(
+            FrameData f,
+            uint rtpTimestamp)
+        {
+            RtspServer.ParseNals(
+                f.Payload,
+                VideoCodec.HEVC,
+                (nalType, nal) =>
+                {
+                    const int MTU = 1400;
+
+                    if (nal.Length < 2)
+                        return;
+
+                    // HEVC NAL header:
+                    //
+                    // byte 0:
+                    // F | Type[5:0] | LayerId[5]
+                    //
+                    // byte 1:
+                    // LayerId[4:0] | TID[2:0]
+                    //
+                    byte originalHeader0 =
+                        nal[0];
+
+                    byte originalHeader1 =
+                        nal[1];
+
+                    if (nal.Length <= MTU)
+                    {
+                        SendRtp(
+                            videoCh,
+                            96,
+                            videoSeq++,
+                            rtpTimestamp,
+                            videoSsrc,
+                            nal,
+                            0,
+                            nal.Length,
+                            marker: IsHevcMarkerNal(
+                                nalType));
+
+                        return;
+                    }
+
+                    /*
+                     * RFC 7798 HEVC fragmentation unit.
+                     *
+                     * Payload:
+                     *
+                     *   2-byte Payload Header
+                     *   1-byte FU Header
+                     *   fragmented NAL payload
+                     *
+                     * Payload Header uses NAL type 49 (FU).
+                     */
+
+                    byte fuHeader0 =
+                        (byte)(
+                            (originalHeader0 & 0x81) |
+                            (49 << 1) |
+                            ((originalHeader0 & 0x01)));
+
+                    /*
+                     * More directly:
+                     *
+                     * F bit comes from original NAL.
+                     * Type = 49.
+                     * LayerId high bit is preserved.
+                     */
+
+                    fuHeader0 =
+                        (byte)(
+                            (originalHeader0 & 0x80) |
+                            (49 << 1) |
+                            ((originalHeader1 >> 5) & 0x01));
+
+                    byte fuHeader1 =
+                        (byte)(
+                            ((originalHeader1 & 0xF8)));
+
+                    int offset = 2;
+                    bool first = true;
+
+                    while (offset < nal.Length)
+                    {
+                        /*
+                         * RTP payload:
+                         *
+                         * 2 bytes HEVC FU payload header
+                         * 1 byte FU header
+                         * payload
+                         */
+
+                        int chunk =
+                            Math.Min(
+                                MTU - 3,
+                                nal.Length - offset);
+
+                        bool last =
+                            offset + chunk >= nal.Length;
+
+                        byte fuType =
+                            (byte)(
+                                (nalType & 0x3F));
+
+                        byte fuHeader =
+                            fuType;
+
+                        if (first)
+                            fuHeader |= 0x80;
+
+                        if (last)
+                            fuHeader |= 0x40;
+
+                        byte[] payload =
+                            new byte[3 + chunk];
+
+                        payload[0] =
+                            fuHeader0;
+
+                        payload[1] =
+                            fuHeader1;
+
+                        payload[2] =
+                            fuHeader;
+
+                        Array.Copy(
+                            nal,
+                            offset,
+                            payload,
+                            3,
+                            chunk);
+
+                        SendRtp(
+                            videoCh,
+                            96,
+                            videoSeq++,
+                            rtpTimestamp,
+                            videoSsrc,
+                            payload,
+                            0,
+                            payload.Length,
+                            marker:
+                                last &&
+                                IsHevcMarkerNal(nalType));
+
+                        offset += chunk;
+                        first = false;
+                    }
+                });
+        }
+
+        private static bool IsHevcMarkerNal(
+            int nalType)
+        {
+            /*
+             * HEVC VCL NAL types:
+             *
+             * 0..31 = VCL
+             *
+             * We use the RTP marker on the final
+             * VCL NAL of an access unit.
+             *
+             * The camera's frames normally contain
+             * the complete access unit in one FrameData.
+             */
+            return nalType >= 0 &&
+                   nalType <= 31;
+        }
+
+        // ---------------------------------------------------------
+        // AUDIO
+        // ---------------------------------------------------------
+
+        public void PushAudio(
+            FrameData f)
+        {
+            if (!playing)
+                return;
+
+            uint rtpTimestamp =
+                (uint)(f.Timestamp * 8);
+
+            const int CHUNK = 160;
+
+            for (
+                int offset = 0;
+                offset < f.Payload.Length;
+                offset += CHUNK)
+            {
+                int length =
+                    Math.Min(
+                        CHUNK,
+                        f.Payload.Length - offset);
+
+                SendRtp(
+                    audioCh,
+                    8,
+                    audioSeq++,
+                    rtpTimestamp,
+                    audioSsrc,
+                    f.Payload,
+                    offset,
+                    length,
+                    marker: false);
+
+                rtpTimestamp +=
+                    (uint)length;
+            }
+        }
+
+        // ---------------------------------------------------------
+        // RTP OVER RTSP/TCP
+        // ---------------------------------------------------------
+
+        private void SendRtp(
+            byte channel,
+            byte payloadType,
+            ushort sequence,
+            uint timestamp,
+            uint ssrc,
+            byte[] payload,
+            int offset,
+            int length,
+            bool marker)
+        {
+            var rtp =
+                new byte[12 + length];
+
+            // RTP version 2.
+            rtp[0] = 0x80;
+
+            // Marker + payload type.
+            rtp[1] =
+                (byte)(
+                    (marker ? 0x80 : 0) |
+                    (payloadType & 0x7F));
+
+            // Sequence number, network byte order.
+            rtp[2] =
+                (byte)(sequence >> 8);
+
+            rtp[3] =
+                (byte)sequence;
+
+            // Timestamp.
+            rtp[4] =
+                (byte)(timestamp >> 24);
+
+            rtp[5] =
+                (byte)(timestamp >> 16);
+
+            rtp[6] =
+                (byte)(timestamp >> 8);
+
+            rtp[7] =
+                (byte)timestamp;
+
+            // SSRC.
+            rtp[8] =
+                (byte)(ssrc >> 24);
+
+            rtp[9] =
+                (byte)(ssrc >> 16);
+
+            rtp[10] =
+                (byte)(ssrc >> 8);
+
+            rtp[11] =
+                (byte)ssrc;
+
+            Array.Copy(
+                payload,
+                offset,
+                rtp,
+                12,
+                length);
+
+            /*
+             * RTSP interleaved framing:
+             *
+             * $       1 byte
+             * channel 1 byte
+             * length  2 bytes, BE
+             * RTP     N bytes
+             */
+
+            var frame =
+                new byte[4 + rtp.Length];
+
+            frame[0] = 0x24;
+            frame[1] = channel;
+
+            frame[2] =
+                (byte)(rtp.Length >> 8);
+
+            frame[3] =
+                (byte)rtp.Length;
+
+            Array.Copy(
+                rtp,
+                0,
+                frame,
+                4,
+                rtp.Length);
+
+            try
+            {
+                lock (ns)
+                {
+                    ns.Write(
+                        frame,
+                        0,
+                        frame.Length);
+
+                    ns.Flush();
+                }
+            }
+            catch
+            {
+                alive = false;
+            }
+        }
+    }
+}

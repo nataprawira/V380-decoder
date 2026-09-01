@@ -13,10 +13,11 @@ namespace V380Decoder.src
 
         private bool authenticated;
         private Thread readThread;
+
         private volatile bool playing;
         private volatile bool alive = true;
 
-        // Interleaved channels negotiated in SETUP.
+        // Interleaved RTP channels negotiated in SETUP.
         private byte videoCh = 0;
         private byte audioCh = 2;
 
@@ -24,11 +25,8 @@ namespace V380Decoder.src
         private ushort videoSeq;
         private ushort audioSeq;
 
-        private readonly uint videoSsrc =
-            (uint)new Random().Next();
-
-        private readonly uint audioSsrc =
-            (uint)new Random().Next();
+        private readonly uint videoSsrc = (uint)new Random().Next();
+        private readonly uint audioSsrc = (uint)new Random().Next();
 
         public event Action OnClose;
 
@@ -61,6 +59,9 @@ namespace V380Decoder.src
 
         public void Close()
         {
+            if (!alive)
+                return;
+
             alive = false;
             playing = false;
 
@@ -72,12 +73,18 @@ namespace V380Decoder.src
             {
             }
 
-            OnClose?.Invoke();
+            try
+            {
+                OnClose?.Invoke();
+            }
+            catch
+            {
+            }
         }
 
-        // ───────────────────────────────────────────────────────
+        // ============================================================
         // RTSP request reader
-        // ───────────────────────────────────────────────────────
+        // ============================================================
 
         private void ReadLoop()
         {
@@ -103,16 +110,13 @@ namespace V380Decoder.src
 
                     int end;
 
-                    while ((end =
-                        raw.IndexOf(
-                            "\r\n\r\n",
-                            StringComparison.Ordinal)) >= 0)
+                    while ((end = raw.IndexOf(
+                        "\r\n\r\n",
+                        StringComparison.Ordinal)) >= 0)
                     {
-                        string req =
-                            raw[..(end + 4)];
+                        string req = raw[..(end + 4)];
 
-                        raw =
-                            raw[(end + 4)..];
+                        raw = raw[(end + 4)..];
 
                         HandleRequest(req);
                     }
@@ -130,23 +134,21 @@ namespace V380Decoder.src
             }
         }
 
-        // ───────────────────────────────────────────────────────
+        // ============================================================
         // Authentication
-        // ───────────────────────────────────────────────────────
+        // ============================================================
 
         private bool CheckAuth(string authHeader)
         {
             if (string.IsNullOrEmpty(authHeader))
                 return false;
 
-            var headerParts =
-                authHeader.Split(':', 2);
+            var headerParts = authHeader.Split(':', 2);
 
             if (headerParts.Length != 2)
                 return false;
 
-            string authValue =
-                headerParts[1].Trim();
+            string authValue = headerParts[1].Trim();
 
             if (!authValue.StartsWith(
                 "Basic ",
@@ -158,16 +160,13 @@ namespace V380Decoder.src
             try
             {
                 string encoded =
-                    authValue["Basic ".Length..]
-                    .Trim();
+                    authValue["Basic ".Length..].Trim();
 
                 string credential =
                     Encoding.ASCII.GetString(
-                        Convert.FromBase64String(
-                            encoded));
+                        Convert.FromBase64String(encoded));
 
-                var parts =
-                    credential.Split(':', 2);
+                var parts = credential.Split(':', 2);
 
                 if (parts.Length == 2 &&
                     parts[0] == server.Username &&
@@ -183,9 +182,9 @@ namespace V380Decoder.src
             return false;
         }
 
-        // ───────────────────────────────────────────────────────
-        // RTSP request handler
-        // ───────────────────────────────────────────────────────
+        // ============================================================
+        // RTSP request handling
+        // ============================================================
 
         private void HandleRequest(string req)
         {
@@ -197,15 +196,16 @@ namespace V380Decoder.src
             if (lines.Length == 0)
                 return;
 
-            string method =
-                lines[0]
-                    .Split(' ')
-                    .ElementAtOrDefault(0) ?? "";
+            string[] requestParts =
+                lines[0].Split(
+                    ' ',
+                    StringSplitOptions.RemoveEmptyEntries);
 
-            string url =
-                lines[0]
-                    .Split(' ')
-                    .ElementAtOrDefault(1) ?? "";
+            if (requestParts.Length < 2)
+                return;
+
+            string method = requestParts[0];
+            string url = requestParts[1];
 
             string cseq =
                 lines.FirstOrDefault(
@@ -213,7 +213,8 @@ namespace V380Decoder.src
                         "CSeq:",
                         StringComparison.OrdinalIgnoreCase))
                 ?.Split(':', 2)[1]
-                .Trim() ?? "0";
+                .Trim()
+                ?? "0";
 
             string transport =
                 lines.FirstOrDefault(
@@ -239,7 +240,8 @@ namespace V380Decoder.src
                     Send(
                         $"RTSP/1.0 401 Unauthorized\r\n" +
                         $"CSeq: {cseq}\r\n" +
-                        $"WWW-Authenticate: Basic realm=\"V380 Authentication\"\r\n\r\n");
+                        $"WWW-Authenticate: Basic realm=\"V380 Authentication\"\r\n" +
+                        $"\r\n");
 
                     return;
                 }
@@ -250,7 +252,6 @@ namespace V380Decoder.src
             switch (method)
             {
                 case "OPTIONS":
-
                     Reply(
                         cseq,
                         "Public: OPTIONS,DESCRIBE,SETUP,PLAY,TEARDOWN");
@@ -259,8 +260,7 @@ namespace V380Decoder.src
 
                 case "DESCRIBE":
                 {
-                    string sdp =
-                        server.BuildSdp();
+                    string sdp = server.BuildSdp();
 
                     byte[] body =
                         Encoding.ASCII.GetBytes(sdp);
@@ -269,7 +269,8 @@ namespace V380Decoder.src
                         $"RTSP/1.0 200 OK\r\n" +
                         $"CSeq: {cseq}\r\n" +
                         $"Content-Type: application/sdp\r\n" +
-                        $"Content-Length: {body.Length}\r\n\r\n" +
+                        $"Content-Length: {body.Length}\r\n" +
+                        $"\r\n" +
                         sdp);
 
                     break;
@@ -278,7 +279,9 @@ namespace V380Decoder.src
                 case "SETUP":
                 {
                     bool isAudio =
-                        url.Contains("trackID=1");
+                        url.Contains(
+                            "trackID=1",
+                            StringComparison.OrdinalIgnoreCase);
 
                     byte ch =
                         (byte)(isAudio ? 2 : 0);
@@ -300,11 +303,6 @@ namespace V380Decoder.src
                     else
                         videoCh = ch;
 
-                    Console.Error.WriteLine(
-                        $"[RTSP#{id}] SETUP " +
-                        $"track={(isAudio ? "audio" : "video")} " +
-                        $"channel={ch}-{ch + 1}");
-
                     Reply(
                         cseq,
                         $"Transport: RTP/AVP/TCP;unicast;interleaved={ch}-{ch + 1}",
@@ -314,23 +312,23 @@ namespace V380Decoder.src
                 }
 
                 case "PLAY":
+                {
+                    Reply(
+                        cseq,
+                        "Session: 1",
+                        $"RTP-Info: url={url}/trackID=0;seq={videoSeq}," +
+                        $"url={url}/trackID=1;seq={audioSeq}");
 
                     playing = true;
 
                     Console.Error.WriteLine(
-                        $"[RTSP#{id}] playing " +
-                        $"videoCh={videoCh} " +
-                        $"audioCh={audioCh}");
-
-                    Reply(
-                        cseq,
-                        "Session: 1",
-                        $"RTP-Info: url={url}/trackID=0;seq={videoSeq},url={url}/trackID=1;seq={audioSeq}");
+                        $"[RTSP#{id}] playing");
 
                     break;
+                }
 
                 case "TEARDOWN":
-
+                {
                     Reply(
                         cseq,
                         "Session: 1");
@@ -338,29 +336,35 @@ namespace V380Decoder.src
                     Close();
 
                     break;
+                }
 
                 default:
-
+                {
                     Send(
                         $"RTSP/1.0 501 Not Implemented\r\n" +
-                        $"CSeq: {cseq}\r\n\r\n");
+                        $"CSeq: {cseq}\r\n" +
+                        $"\r\n");
 
                     break;
+                }
             }
         }
+
+        // ============================================================
+        // RTSP response
+        // ============================================================
 
         private void Reply(
             string cseq,
             params string[] headers)
         {
-            var sb =
-                new StringBuilder();
+            var sb = new StringBuilder();
 
             sb.Append(
                 $"RTSP/1.0 200 OK\r\n" +
                 $"CSeq: {cseq}\r\n");
 
-            foreach (var h in headers)
+            foreach (string h in headers)
                 sb.Append(h + "\r\n");
 
             sb.Append("\r\n");
@@ -391,24 +395,22 @@ namespace V380Decoder.src
             }
         }
 
-        // ───────────────────────────────────────────────────────
+        // ============================================================
         // RTP VIDEO
-        // H.264 / HEVC Annex-B -> RTP
-        // ───────────────────────────────────────────────────────
+        //
+        // H.264:
+        //   RFC 6184
+        //   Single NAL / FU-A
+        //
+        // HEVC:
+        //   RFC 7798
+        //   Single NAL / FU
+        // ============================================================
 
         public void PushVideo(FrameData f)
         {
             if (!playing)
-            {
                 return;
-            }
-
-            Console.Error.WriteLine(
-                $"[RTSP#{id}] PUSH VIDEO " +
-                $"codec={f.Codec} " +
-                $"raw=0x{f.RawType:X2} " +
-                $"frame={f.FrameId} " +
-                $"bytes={f.Payload.Length}");
 
             uint rts =
                 (uint)(f.Timestamp * 90);
@@ -418,51 +420,49 @@ namespace V380Decoder.src
                 f.Codec,
                 (nalType, nal) =>
                 {
-                    const int MTU = 1400;
-
-                    if (f.Codec == VideoCodec.HEVC)
+                    if (f.Codec == VideoCodec.H264)
                     {
-                        SendHevcNal(
+                        PushH264Nal(
+                            nal,
+                            rts);
+                    }
+                    else
+                    {
+                        PushHevcNal(
                             nal,
                             nalType,
-                            rts,
-                            MTU);
-
-                        return;
+                            rts);
                     }
-
-                    SendH264Nal(
-                        nal,
-                        rts,
-                        MTU);
                 });
         }
 
-        // ───────────────────────────────────────────────────────
+        // ============================================================
         // H.264 RTP
-        // ───────────────────────────────────────────────────────
+        // ============================================================
 
-        private void SendH264Nal(
+        private void PushH264Nal(
             byte[] nal,
-            uint rts,
-            int mtu)
+            uint timestamp)
         {
-            if (nal.Length <= mtu)
+            const int MTU = 1400;
+
+            if (nal.Length <= MTU)
             {
                 SendRtp(
                     videoCh,
                     96,
                     videoSeq++,
-                    rts,
+                    timestamp,
                     videoSsrc,
                     nal,
                     0,
                     nal.Length,
-                    true);
+                    marker: true);
 
                 return;
             }
 
+            // H.264 FU-A.
             byte nalHdr = nal[0];
 
             byte fuInd =
@@ -476,7 +476,7 @@ namespace V380Decoder.src
             {
                 int chunk =
                     Math.Min(
-                        mtu - 2,
+                        MTU - 2,
                         nal.Length - offset);
 
                 bool last =
@@ -508,71 +508,91 @@ namespace V380Decoder.src
                     videoCh,
                     96,
                     videoSeq++,
-                    rts,
+                    timestamp,
                     videoSsrc,
                     frag,
                     0,
                     frag.Length,
-                    last);
+                    marker: last);
 
                 offset += chunk;
                 first = false;
             }
         }
 
-        // ───────────────────────────────────────────────────────
+        // ============================================================
         // HEVC RTP
-        // RFC 7798
         //
-        // HEVC:
-        // NAL header = 2 bytes
+        // RFC 7798:
         //
-        // Payload type 96
+        // Original HEVC NAL header = 2 bytes
         //
-        // Single NAL:
-        // original NAL unchanged
+        // FU payload:
         //
-        // Fragmentation Unit:
-        // FU indicator:
-        //   F + LayerId + Type 49
+        //   2-byte payload header
+        //   1-byte FU header
+        //   original NAL payload after 2-byte NAL header
+        //
+        // FU type = 49
         //
         // FU header:
-        //   S | E | Type
-        // ───────────────────────────────────────────────────────
+        //   bit 7 = S
+        //   bit 6 = E
+        //   bits 0..5 = original NAL type
+        // ============================================================
 
-        private void SendHevcNal(
+        private void PushHevcNal(
             byte[] nal,
             int nalType,
-            uint rts,
-            int mtu)
+            uint timestamp)
         {
-            if (nal.Length <= mtu)
+            const int MTU = 1400;
+
+            if (nal.Length < 2)
+                return;
+
+            if (nal.Length <= MTU)
             {
                 SendRtp(
                     videoCh,
                     96,
                     videoSeq++,
-                    rts,
+                    timestamp,
                     videoSsrc,
                     nal,
                     0,
                     nal.Length,
-                    true);
+                    marker: true);
 
                 return;
             }
 
-            if (nal.Length < 3)
-                return;
-
+            // Original HEVC NAL header:
+            //
+            // byte 0:
+            //   forbidden_zero_bit
+            //   nal_unit_type bits 1..6
+            //   nuh_layer_id bit 0
+            //
+            // byte 1:
+            //   remaining nuh_layer_id
+            //   temporal_id_plus1
+            //
             byte h0 = nal[0];
             byte h1 = nal[1];
 
-            // HEVC FU indicator:
-            // forbidden bit + layer_id bits
-            // + NAL type 49.
+            // FU indicator:
+            //
+            // forbidden_zero_bit + layer_id
+            // preserved from original NAL header,
+            // but NAL type becomes 49.
+            //
+            // NAL type occupies bits 1..6.
+            //
             byte fu0 =
-                (byte)((h0 & 0x81) | (49 << 1));
+                (byte)(
+                    (h0 & 0x81) |
+                    (49 << 1));
 
             byte fu1 = h1;
 
@@ -582,29 +602,35 @@ namespace V380Decoder.src
 
             while (offset < nal.Length)
             {
+                // FU payload consists of:
+                //
+                //   2-byte FU indicator
+                //   1-byte FU header
+                //   payload
+                //
                 int chunk =
                     Math.Min(
-                        mtu - 3,
+                        MTU - 3,
                         nal.Length - offset);
 
                 bool last =
                     offset + chunk >= nal.Length;
 
-                byte fuHdr =
+                byte fuHeader =
                     (byte)(nalType & 0x3F);
 
                 if (first)
-                    fuHdr |= 0x80;
+                    fuHeader |= 0x80;
 
                 if (last)
-                    fuHdr |= 0x40;
+                    fuHeader |= 0x40;
 
                 var frag =
                     new byte[3 + chunk];
 
                 frag[0] = fu0;
                 frag[1] = fu1;
-                frag[2] = fuHdr;
+                frag[2] = fuHeader;
 
                 Array.Copy(
                     nal,
@@ -617,22 +643,21 @@ namespace V380Decoder.src
                     videoCh,
                     96,
                     videoSeq++,
-                    rts,
+                    timestamp,
                     videoSsrc,
                     frag,
                     0,
                     frag.Length,
-                    last);
+                    marker: last);
 
                 offset += chunk;
                 first = false;
             }
         }
 
-        // ───────────────────────────────────────────────────────
+        // ============================================================
         // RTP AUDIO
-        // PCMA
-        // ───────────────────────────────────────────────────────
+        // ============================================================
 
         public void PushAudio(FrameData f)
         {
@@ -642,6 +667,7 @@ namespace V380Decoder.src
             uint rts =
                 (uint)(f.Timestamp * 8);
 
+            // 20 ms @ 8 kHz = 160 samples.
             const int CHUNK = 160;
 
             for (
@@ -663,17 +689,17 @@ namespace V380Decoder.src
                     f.Payload,
                     off,
                     len,
-                    false);
+                    marker: false);
 
                 rts += (uint)len;
             }
         }
 
-        // ───────────────────────────────────────────────────────
-        // RTP sender with RTSP interleaved framing
+        // ============================================================
+        // RTP over RTSP/TCP interleaved
         //
         // $ | channel | length BE | RTP
-        // ───────────────────────────────────────────────────────
+        // ============================================================
 
         private void SendRtp(
             byte channel,
@@ -689,42 +715,30 @@ namespace V380Decoder.src
             var rtp =
                 new byte[12 + length];
 
+            // RTP version = 2.
             rtp[0] = 0x80;
 
+            // Marker + payload type.
             rtp[1] =
                 (byte)(
                     (marker ? 0x80 : 0) |
                     (pt & 0x7F));
 
-            rtp[2] =
-                (byte)(seq >> 8);
+            // Sequence.
+            rtp[2] = (byte)(seq >> 8);
+            rtp[3] = (byte)seq;
 
-            rtp[3] =
-                (byte)seq;
+            // Timestamp.
+            rtp[4] = (byte)(ts >> 24);
+            rtp[5] = (byte)(ts >> 16);
+            rtp[6] = (byte)(ts >> 8);
+            rtp[7] = (byte)ts;
 
-            rtp[4] =
-                (byte)(ts >> 24);
-
-            rtp[5] =
-                (byte)(ts >> 16);
-
-            rtp[6] =
-                (byte)(ts >> 8);
-
-            rtp[7] =
-                (byte)ts;
-
-            rtp[8] =
-                (byte)(ssrc >> 24);
-
-            rtp[9] =
-                (byte)(ssrc >> 16);
-
-            rtp[10] =
-                (byte)(ssrc >> 8);
-
-            rtp[11] =
-                (byte)ssrc;
+            // SSRC.
+            rtp[8] = (byte)(ssrc >> 24);
+            rtp[9] = (byte)(ssrc >> 16);
+            rtp[10] = (byte)(ssrc >> 8);
+            rtp[11] = (byte)ssrc;
 
             Array.Copy(
                 payload,
@@ -733,15 +747,14 @@ namespace V380Decoder.src
                 12,
                 length);
 
+            // RTSP interleaved framing.
             var frame =
                 new byte[4 + rtp.Length];
 
-            frame[0] = 0x24;
+            frame[0] = 0x24; // '$'
             frame[1] = channel;
-
             frame[2] =
                 (byte)(rtp.Length >> 8);
-
             frame[3] =
                 (byte)rtp.Length;
 
@@ -754,16 +767,6 @@ namespace V380Decoder.src
 
             try
             {
-                Console.Error.WriteLine(
-                    $"[RTSP#{id}] RTP OUT " +
-                    $"codec-pt={pt} " +
-                    $"ch={channel} " +
-                    $"seq={seq} " +
-                    $"ts={ts} " +
-                    $"payload={length} " +
-                    $"frameBytes={frame.Length} " +
-                    $"marker={marker}");
-
                 lock (ns)
                 {
                     ns.Write(

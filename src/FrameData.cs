@@ -1,13 +1,24 @@
 namespace V380Decoder.src
 {
+    public enum VideoCodec
+    {
+        H264,
+        HEVC
+    }
+
     public class FrameData
     {
-        public byte RawType;   // fragment header type byte (0x00/0x01/0x1A)
+        public byte RawType;
         public uint FrameId;
         public ushort FrameType;
         public ushort FrameRate;
         public ulong Timestamp;
         public byte[] Payload;
-        public bool IsKeyframe => RawType == 0x00;
+        public VideoCodec Codec;
+
+        public bool IsKeyframe =>
+            Codec == VideoCodec.HEVC
+                ? RawType == 0x28
+                : RawType == 0x00;
     }
 }

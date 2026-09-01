@@ -450,8 +450,7 @@ namespace V380Decoder.src
                             FrameType = frameType,
                             FrameRate = frameRate,
                             Timestamp = timestamp,
-                            Payload = payload,
-                            Codec = isHevc ? VideoCodec.HEVC : VideoCodec.H264
+                            Payload = payload
                         };
 
                         if (mode == OutputMode.Video)
@@ -463,15 +462,8 @@ namespace V380Decoder.src
                         {
                             // Current RtspServer/RtspSession packetizer is H.264-only.
                             // HEVC RTSP support will be added after raw HEVC is proven.
-                            if (isH264 || isHevc)
-                            {
-                                Console.Error.WriteLine(
-                                    $"[RTSP-DISPATCH] codec={(isHevc ? "HEVC" : "H264")} " +
-                                    $"type=0x{type:X2} frameId={frameId} len={payload.Length} " +
-                                    $"rtspNull={(rtsp == null)}");
-
+                            if (isH264)
                                 rtsp?.PushVideo(fd);
-                            }
                         }
                     }
 

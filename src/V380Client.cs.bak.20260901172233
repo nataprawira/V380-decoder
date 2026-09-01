@@ -450,8 +450,7 @@ namespace V380Decoder.src
                             FrameType = frameType,
                             FrameRate = frameRate,
                             Timestamp = timestamp,
-                            Payload = payload,
-                            Codec = isHevc ? VideoCodec.HEVC : VideoCodec.H264
+                            Payload = payload
                         };
 
                         if (mode == OutputMode.Video)

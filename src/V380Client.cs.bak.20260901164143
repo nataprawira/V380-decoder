@@ -362,13 +362,8 @@ namespace V380Decoder.src
                     if (payloadBuf.Length < payLen) payloadBuf = new byte[payLen];
                     if (ReadExact(streamStream, payloadBuf, 0, payLen) < payLen) continue;
 
-                    // VIDEO
-                    // H.264: 0x00=I-frame, 0x01=P-frame
-                    // HEVC : 0x28=I-frame, 0x29=P-frame
-                    bool isH264 = type == 0x00 || type == 0x01;
-                    bool isHevc = type == 0x28 || type == 0x29;
-
-                    if (isH264 || isHevc)
+                    // VIDEO  0x00=I-frame  0x01=P-frame
+                    if (type == 0x00 || type == 0x01)
                     {
                         if (curFrame == 0) { videoFrags.Clear(); videoTotal = totalFrame; }
                         if (totalFrame != videoTotal) { videoFrags.Clear(); videoTotal = totalFrame; }
@@ -398,50 +393,16 @@ namespace V380Decoder.src
                                 DecryptVideoFrame(payload, payload.Length);
                         }
 
-                        // H.264 and HEVC can both use Annex-B start codes:
-                        // 00 00 01 or 00 00 00 01
-                        bool annexB3 =
-                            payload.Length >= 3 &&
-                            payload[0] == 0 &&
-                            payload[1] == 0 &&
-                            payload[2] == 1;
-
-                        bool annexB4 =
-                            payload.Length >= 4 &&
-                            payload[0] == 0 &&
-                            payload[1] == 0 &&
-                            payload[2] == 0 &&
-                            payload[3] == 1;
-
-                        if (!annexB3 && !annexB4)
+                        // validate H.264 start code
+                        if (payload.Length < 4 ||
+                            payload[0] != 0 || payload[1] != 0 ||
+                            payload[2] != 0 || payload[3] != 1)
                         {
-                            string firstBytes = Convert.ToHexString(
-                                payload.AsSpan(0, Math.Min(payload.Length, 32)));
-
-                            Console.Error.WriteLine(
-                                $"[VIDEO] bad start code codec={(isHevc ? "HEVC" : "H264")} " +
-                                $"type=0x{type:X2} len={payload.Length} first={firstBytes}");
-
+                            Console.Error.WriteLine($"[VIDEO] bad start code, len={payload.Length}");
                             continue;
                         }
 
-                        // Existing SnapshotManager is H.264-only.
-                        // Do not feed HEVC into H264Sharp/FFmpeg snapshot path yet.
-                        if (isH264)
-                        {
-                            snapshotManager.UpdateFrame(
-                                payload,
-                                frameWidth,
-                                frameheight,
-                                isIFrame: type == 0x00);
-                        }
-
-                        if (isHevc && (type == 0x28))
-                        {
-                            Console.Error.WriteLine(
-                                $"[HEVC] keyframe frameId={frameId} len={payload.Length} " +
-                                $"start={(annexB4 ? "00000001" : "000001")}");
-                        }
+                        snapshotManager.UpdateFrame(payload, frameWidth, frameheight, isIFrame: type == 0x00);
 
                         var fd = new FrameData
                         {
@@ -450,8 +411,7 @@ namespace V380Decoder.src
                             FrameType = frameType,
                             FrameRate = frameRate,
                             Timestamp = timestamp,
-                            Payload = payload,
-                            Codec = isHevc ? VideoCodec.HEVC : VideoCodec.H264
+                            Payload = payload
                         };
 
                         if (mode == OutputMode.Video)
@@ -461,17 +421,7 @@ namespace V380Decoder.src
                         }
                         else if (mode == OutputMode.Rtsp)
                         {
-                            // Current RtspServer/RtspSession packetizer is H.264-only.
-                            // HEVC RTSP support will be added after raw HEVC is proven.
-                            if (isH264 || isHevc)
-                            {
-                                Console.Error.WriteLine(
-                                    $"[RTSP-DISPATCH] codec={(isHevc ? "HEVC" : "H264")} " +
-                                    $"type=0x{type:X2} frameId={frameId} len={payload.Length} " +
-                                    $"rtspNull={(rtsp == null)}");
-
-                                rtsp?.PushVideo(fd);
-                            }
+                            rtsp?.PushVideo(fd);
                         }
                     }
 
@@ -526,11 +476,8 @@ namespace V380Decoder.src
                             rtsp?.PushAudio(fd);
                         }
                     }
-                    else if (type == 0x5B || type == 0x16)
+                    else if (type == 0x5B)
                     {
-                        // 0x5B: existing ignored/control packet
-                        // 0x16: observed on this camera between HEVC frames.
-                        // Its purpose is not confirmed yet, so ignore safely.
                         continue;
                     }
                     else

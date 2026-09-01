@@ -10,7 +10,6 @@ namespace V380Decoder.src
         private readonly bool secure;
         private readonly string username;
         private readonly string password;
-
         private TcpListener listener;
         private Thread acceptThread;
         private volatile bool running;
@@ -26,14 +25,9 @@ namespace V380Decoder.src
         private byte[] cachedVps;
 
         private VideoCodec? detectedCodec;
-
         private readonly object sdpLock = new();
 
-        public RtspServer(
-            int port,
-            bool secure,
-            string username,
-            string password)
+        public RtspServer(int port, bool secure, string username, string password)
         {
             this.port = port;
             this.username = username;
@@ -47,66 +41,46 @@ namespace V380Decoder.src
 
         public void Start()
         {
-            string basicAuth =
-                secure
-                    ? $"{username}:{password}@"
-                    : string.Empty;
+            string basicAuth = secure ? $"{username}:{password}@" : string.Empty;
 
-            listener =
-                new TcpListener(
-                    IPAddress.Any,
-                    port);
-
+            listener = new TcpListener(IPAddress.Any, port);
             listener.Start(10);
 
             running = true;
 
-            acceptThread =
-                new Thread(AcceptLoop)
-                {
-                    IsBackground = true,
-                    Name = "rtsp-accept"
-                };
+            acceptThread = new Thread(AcceptLoop)
+            {
+                IsBackground = true,
+                Name = "rtsp-accept"
+            };
 
             acceptThread.Start();
 
             Console.Error.WriteLine(
-                $"[RTSP] rtsp://{basicAuth}" +
-                $"{NetworkHelper.GetLocalIPAddress()}:{port}/live");
+                $"[RTSP] rtsp://{basicAuth}{NetworkHelper.GetLocalIPAddress()}:{port}/live");
         }
 
-        private void AcceptLoop()
+        void AcceptLoop()
         {
             while (running)
             {
                 try
                 {
-                    var tcp =
-                        listener.AcceptTcpClient();
-
+                    var tcp = listener.AcceptTcpClient();
                     tcp.NoDelay = true;
 
-                    int id =
-                        Interlocked.Increment(
-                            ref nextId);
+                    int id = Interlocked.Increment(ref nextId);
 
-                    var session =
-                        new RtspSession(
-                            id,
-                            tcp,
-                            this,
-                            secure);
+                    var s = new RtspSession(id, tcp, this, secure);
 
-                    sessions[id] = session;
+                    sessions[id] = s;
 
-                    session.OnClose += () =>
+                    s.OnClose += () =>
                     {
-                        sessions.TryRemove(
-                            id,
-                            out _);
+                        sessions.TryRemove(id, out _);
                     };
 
-                    session.Start();
+                    s.Start();
                 }
                 catch
                 {
@@ -116,22 +90,20 @@ namespace V380Decoder.src
             }
         }
 
-        // ---------------------------------------------------------
-        // VIDEO
-        // ---------------------------------------------------------
-
+        // Called for every complete video frame.
         public void PushVideo(FrameData f)
         {
             DetectAndCacheVideoParameters(f);
 
-            foreach (var session in sessions.Values)
-                session.PushVideo(f);
+            foreach (var s in sessions.Values)
+                s.PushVideo(f);
         }
 
+        // Called for every complete audio frame.
         public void PushAudio(FrameData f)
         {
-            foreach (var session in sessions.Values)
-                session.PushAudio(f);
+            foreach (var s in sessions.Values)
+                s.PushAudio(f);
         }
 
         private void DetectAndCacheVideoParameters(FrameData f)
@@ -146,7 +118,7 @@ namespace V380Decoder.src
                         $"[RTSP] detected codec={detectedCodec}");
                 }
 
-                ParseNals(
+                RtspServer.ParseNals(
                     f.Payload,
                     f.Codec,
                     (nalType, nal) =>
@@ -157,20 +129,16 @@ namespace V380Decoder.src
                             // 7 = SPS
                             // 8 = PPS
 
-                            if (nalType == 7 &&
-                                cachedSps == null)
+                            if (nalType == 7 && cachedSps == null)
                             {
                                 cachedSps = nal;
-
                                 Console.Error.WriteLine(
                                     $"[RTSP] cached H264 SPS len={nal.Length}");
                             }
 
-                            if (nalType == 8 &&
-                                cachedPps == null)
+                            if (nalType == 8 && cachedPps == null)
                             {
                                 cachedPps = nal;
-
                                 Console.Error.WriteLine(
                                     $"[RTSP] cached H264 PPS len={nal.Length}");
                             }
@@ -182,29 +150,23 @@ namespace V380Decoder.src
                             // 33 = SPS
                             // 34 = PPS
 
-                            if (nalType == 32 &&
-                                cachedVps == null)
+                            if (nalType == 32 && cachedVps == null)
                             {
                                 cachedVps = nal;
-
                                 Console.Error.WriteLine(
                                     $"[RTSP] cached HEVC VPS len={nal.Length}");
                             }
 
-                            if (nalType == 33 &&
-                                cachedSps == null)
+                            if (nalType == 33 && cachedSps == null)
                             {
                                 cachedSps = nal;
-
                                 Console.Error.WriteLine(
                                     $"[RTSP] cached HEVC SPS len={nal.Length}");
                             }
 
-                            if (nalType == 34 &&
-                                cachedPps == null)
+                            if (nalType == 34 && cachedPps == null)
                             {
                                 cachedPps = nal;
-
                                 Console.Error.WriteLine(
                                     $"[RTSP] cached HEVC PPS len={nal.Length}");
                             }
@@ -213,10 +175,7 @@ namespace V380Decoder.src
             }
         }
 
-        // ---------------------------------------------------------
-        // NAL PARSER
-        // ---------------------------------------------------------
-
+        // Walk Annex-B start codes and return codec-aware NAL types.
         internal static void ParseNals(
             byte[] data,
             VideoCodec codec,
@@ -227,31 +186,23 @@ namespace V380Decoder.src
 
             while (i < len)
             {
-                int sc =
-                    FindStartCode(
-                        data,
-                        i);
+                int sc = FindStartCode(data, i);
 
                 if (sc < 0)
                     break;
 
                 int scLen =
-                    IsThreeByteStartCode(
-                        data,
-                        sc)
+                    (sc + 3 < len &&
+                     data[sc + 2] == 1)
                         ? 3
                         : 4;
 
-                int nalStart =
-                    sc + scLen;
+                int nalStart = sc + scLen;
 
                 if (nalStart >= len)
                     break;
 
-                int next =
-                    FindStartCode(
-                        data,
-                        nalStart);
+                int next = FindStartCode(data, nalStart);
 
                 int nalEnd =
                     next < 0
@@ -268,14 +219,14 @@ namespace V380Decoder.src
 
                 if (codec == VideoCodec.HEVC)
                 {
-                    // HEVC NAL type:
+                    // HEVC NAL unit type:
                     // bits 1..6 of first byte.
                     nalType =
                         (data[nalStart] >> 1) & 0x3F;
                 }
                 else
                 {
-                    // H.264 NAL type:
+                    // H.264 NAL unit type:
                     // low 5 bits.
                     nalType =
                         data[nalStart] & 0x1F;
@@ -297,44 +248,23 @@ namespace V380Decoder.src
             }
         }
 
-        private static bool IsThreeByteStartCode(
-            byte[] data,
-            int pos)
+        static int FindStartCode(byte[] d, int from)
         {
-            return
-                pos + 2 < data.Length &&
-                data[pos] == 0 &&
-                data[pos + 1] == 0 &&
-                data[pos + 2] == 1;
-        }
-
-        private static int FindStartCode(
-            byte[] data,
-            int from)
-        {
-            for (
-                int i = from;
-                i + 3 < data.Length;
-                i++)
+            for (int i = from; i + 3 < d.Length; i++)
             {
-                if (data[i] != 0 ||
-                    data[i + 1] != 0)
-                    continue;
+                if (d[i] == 0 && d[i + 1] == 0)
+                {
+                    if (d[i + 2] == 1)
+                        return i;
 
-                if (data[i + 2] == 1)
-                    return i;
-
-                if (data[i + 2] == 0 &&
-                    data[i + 3] == 1)
-                    return i;
+                    if (d[i + 2] == 0 &&
+                        d[i + 3] == 1)
+                        return i;
+                }
             }
 
             return -1;
         }
-
-        // ---------------------------------------------------------
-        // CODEC
-        // ---------------------------------------------------------
 
         public VideoCodec? GetDetectedCodec()
         {
@@ -342,30 +272,15 @@ namespace V380Decoder.src
                 return detectedCodec;
         }
 
-        // ---------------------------------------------------------
-        // SDP
-        // ---------------------------------------------------------
-
         public string BuildSdp()
         {
             lock (sdpLock)
             {
-                /*
-                 * Important:
-                 *
-                 * This camera is HEVC.
-                 *
-                 * If the stream has already arrived, detectedCodec
-                 * will be HEVC and the proper SDP is generated.
-                 *
-                 * For the current V380 camera, defaulting to HEVC
-                 * before first frame avoids advertising H264 while
-                 * the client is waiting for the first camera frame.
-                 */
-                if (detectedCodec == VideoCodec.H264)
-                    return BuildH264Sdp();
+                // Camera is already known to be HEVC in our current case.
+                if (detectedCodec == VideoCodec.HEVC)
+                    return BuildHevcSdp();
 
-                return BuildHevcSdp();
+                return BuildH264Sdp();
             }
         }
 
@@ -377,25 +292,21 @@ namespace V380Decoder.src
                 cachedPps != null)
             {
                 string spsB64 =
-                    Convert.ToBase64String(
-                        cachedSps);
+                    Convert.ToBase64String(cachedSps);
 
                 string ppsB64 =
-                    Convert.ToBase64String(
-                        cachedPps);
+                    Convert.ToBase64String(cachedPps);
 
-                string profileLevelId =
+                string pli =
                     cachedSps.Length >= 3
-                        ? $"{cachedSps[0]:X2}" +
-                          $"{cachedSps[1]:X2}" +
-                          $"{cachedSps[2]:X2}"
+                        ? $"{cachedSps[0]:X2}{cachedSps[1]:X2}{cachedSps[2]:X2}"
                         : "64001F";
 
                 fmtp =
                     $"a=fmtp:96 " +
                     $"packetization-mode=1;" +
                     $"sprop-parameter-sets={spsB64},{ppsB64};" +
-                    $"profile-level-id={profileLevelId}\r\n";
+                    $"profile-level-id={pli}\r\n";
             }
 
             return
@@ -422,16 +333,13 @@ namespace V380Decoder.src
                 cachedPps != null)
             {
                 string vpsB64 =
-                    Convert.ToBase64String(
-                        cachedVps);
+                    Convert.ToBase64String(cachedVps);
 
                 string spsB64 =
-                    Convert.ToBase64String(
-                        cachedSps);
+                    Convert.ToBase64String(cachedSps);
 
                 string ppsB64 =
-                    Convert.ToBase64String(
-                        cachedPps);
+                    Convert.ToBase64String(cachedPps);
 
                 fmtp =
                     $"a=fmtp:96 " +
@@ -455,10 +363,6 @@ namespace V380Decoder.src
                 "a=control:trackID=1\r\n";
         }
 
-        // ---------------------------------------------------------
-        // DISPOSE
-        // ---------------------------------------------------------
-
         public void Dispose()
         {
             running = false;
@@ -471,8 +375,8 @@ namespace V380Decoder.src
             {
             }
 
-            foreach (var session in sessions.Values)
-                session.Close();
+            foreach (var s in sessions.Values)
+                s.Close();
         }
     }
 }
